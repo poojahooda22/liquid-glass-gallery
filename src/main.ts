@@ -1,13 +1,15 @@
 import './style.css';
-import { CARDS } from './content';
-import { DISPERSION_SAMPLES, DPR_CAP, DRAG, GLASS, GRID, INTRO_GAP, INTRO_SPRING } from './config';
+import { CARDS, IMAGE_POOL, VIDEO_POOL } from './content';
+import { DISPERSION_SAMPLES, DPR_CAP, DRAG, GLASS, GRID, INTRO_GAP, INTRO_SPRING, VIDEO } from './config';
 import { computeLayout, type Layout } from './layout';
 import { clamp, composeTRS, lookAtOrigin, perspectiveMat, quatFromZ, rotateInverse, wrap } from './math';
 import { Spring } from './spring';
 import { buildPlane, spectralWeights, type Plane } from './gl/plane';
 import { makeProgram, uniformMap } from './gl/program';
 import { buildLabelCanvases, uploadLabels } from './gl/textures';
-import { ANIM_BUDGET, createSceneBank, generateEnvTexture, type SceneBank } from './gl/scenegen';
+import { createSceneBank, generateEnvTexture, type SceneBank } from './gl/scenegen';
+import { createImageBank, type ImageBank } from './gl/images';
+import { createVideoBank, type VideoBank } from './gl/video';
 import { assignCards } from './assign';
 import { GLASS_FRAG, GLASS_VERT } from './shaders/glass';
 
@@ -55,7 +57,7 @@ const UNIFORMS = [
   'uIor', 'uRefractStrength', 'uDispersion', 'uFresnelF0',
   'uEnvIntensity', 'uEnvMaxMix', 'uEnvRot', 'uEnvRotX',
   'uRimWidth', 'uRimIntensity', 'uOpacity',
-  'uRimColor', 'uRimColorTop', 'uTint', 'uSamples', 'uFlat', 'uSW', 'uSO', 'uEnvScale',
+  'uRimColor', 'uRimColorTop', 'uTint', 'uSamples', 'uFlat', 'uSW', 'uSO', 'uEnvScale', 'uEnvSquare',
 ] as const;
 
 const labelCanvases = buildLabelCanvases();
@@ -65,8 +67,10 @@ let program!: WebGLProgram;
 let u!: Record<string, WebGLUniformLocation | null>;
 let plane!: Plane;
 let sceneBank!: SceneBank;
+let imageBank: ImageBank | null = null;
 let labelTextures!: WebGLTexture[];
 let envTexture!: WebGLTexture;
+let videoBank: VideoBank | null = null;
 let layout!: Layout;
 
 /** Everything that dies with the GL context, so a restore can rebuild it. */
@@ -74,10 +78,25 @@ function buildResources(): void {
   program = makeProgram(gl, GLASS_VERT, GLASS_FRAG);
   u = uniformMap(gl, program, UNIFORMS);
   plane = buildPlane(gl, program);
-  sceneBank = createSceneBank(gl);
+  /* Three tiers of card content, best available per card. Footage is what
+     the reference actually shows and what makes a card read as alive; the
+     stills cover the seconds while clips buffer, and the procedural painters
+     cover the frames before even those arrive. */
+  videoBank?.dispose();
+  const clips = VIDEO.sources.length > 0
+    ? VIDEO.sources
+    : VIDEO_POOL.map((src) => ({ src }));
+  videoBank = VIDEO.enabled && clips.length > 0
+    ? createVideoBank(gl, clips, VIDEO.hlsUrl)
+    : null;
+  imageBank?.dispose();
+  imageBank = createImageBank(gl, IMAGE_POOL);
+  sceneBank = createSceneBank(gl, { videos: videoBank, images: imageBank });
   labelTextures = uploadLabels(gl, labelCanvases);
   const env = generateEnvTexture(gl);
   envTexture = env.texture;
+  const envScale = env.scale;
+  const envSquare = env.square;
   /* The generators render into their own framebuffers at their own sizes and
      leave the viewport behind them. Without this the whole grid draws into a
      1024x512 corner of the canvas. */
@@ -86,6 +105,8 @@ function buildResources(): void {
   gl.useProgram(program);
   gl.uniform1i(u.uTex ?? null, 0);
   gl.uniform1i(u.uEnv ?? null, 1);
+  /* Cover-fit is uploaded per card in the draw loop when a video is bound;
+     these are the identity defaults the procedural scenes use. */
   gl.uniform2f(u.uCoverScale ?? null, 1, 1);
   gl.uniform2f(u.uCoverOffset ?? null, 0, 0);
   gl.uniform1f(u.uBevelPow ?? null, GLASS.bevelPower);
@@ -98,6 +119,12 @@ function buildResources(): void {
   gl.uniform1f(u.uEnvMaxMix ?? null, GLASS.envMaxMix);
   gl.uniform1f(u.uEnvRot ?? null, GLASS.envRotation);
   gl.uniform1f(u.uEnvRotX ?? null, GLASS.envRotationX);
+  /* The multiplier that turns the stored environment back into HDR. Without
+     it this uniform stays at its GL default of 0, the env sample is black,
+     and the fresnel mix can only ever DARKEN the bevel - which is the
+     difference between a lit slab and a flat sticker. */
+  gl.uniform1f(u.uEnvScale ?? null, envScale);
+  gl.uniform1f(u.uEnvSquare ?? null, envSquare);
   gl.uniform1f(u.uRimIntensity ?? null, GLASS.rimIntensity);
   gl.uniform3fv(u.uRimColor ?? null, GLASS.rimColor as unknown as number[]);
   gl.uniform3fv(u.uRimColorTop ?? null, GLASS.rimColorTop as unknown as number[]);
@@ -166,8 +193,15 @@ function applyLayoutUniforms(): void {
 
 /* ---- input ------------------------------------------------------------ */
 
-/** Horizontal only. The grid covers the viewport vertically and stays there. */
+/* Both axes. The layout is a flat TORUS bent onto a sphere, so it already
+   wraps in y as well as x - the grid was one-directional only because nothing
+   drove the second offset. Feeding a y offset through the same wrap gives
+   free panning in any direction, diagonals included, with no extra meshes and
+   no special case at the seam. It stays seamless because roundEven() forces
+   an even row count: odd rows carry the half-cell brick stagger, so wrapping
+   row 0 above row rows-1 only lines up when that count is even. */
 const scrollX = new Spring(0, DRAG.spring);
+const scrollY = new Spring(0, DRAG.spring);
 /** Drag speed in px/s, smoothed, driving the camera dolly. */
 const magnitude = new Spring(0, DRAG.magnitudeSpring);
 /** Cell gap: starts scattered, springs closed. This is the whole intro. */
@@ -181,7 +215,9 @@ const parallaxY = new Spring(0, PARALLAX_SPRING);
 
 let dragging = false;
 let lastPointerX = 0;
+let lastPointerY = 0;
 let flingX = 0;
+let flingY = 0;
 
 window.addEventListener('pointermove', (e) => {
   if (reduced) return;
@@ -192,7 +228,9 @@ window.addEventListener('pointermove', (e) => {
 canvas.addEventListener('pointerdown', (e) => {
   dragging = true;
   lastPointerX = e.clientX;
+  lastPointerY = e.clientY;
   flingX = 0;
+  flingY = 0;
   canvas.classList.add('dragging');
   canvas.setPointerCapture(e.pointerId);
 });
@@ -200,12 +238,19 @@ canvas.addEventListener('pointerdown', (e) => {
 canvas.addEventListener('pointermove', (e) => {
   if (!dragging) return;
   const dx = e.clientX - lastPointerX;
+  const dy = e.clientY - lastPointerY;
   lastPointerX = e.clientX;
+  lastPointerY = e.clientY;
   scrollX.target += dx * DRAG.multiplier;
+  /* +dy here, and the row term subtracts it below: world y points up, screen
+     y points down, so the two sign flips cancel and the grid tracks the
+     finger instead of running away from it. */
+  scrollY.target += dy * DRAG.multiplier;
   /* Exponential carry rather than a raw last-delta: a single 120Hz sample is
      mostly noise, and the release would fling on whichever frame happened to
      be last. */
   flingX = flingX * 0.7 + dx * 0.3;
+  flingY = flingY * 0.7 + dy * 0.3;
 });
 
 function endDrag(e: PointerEvent): void {
@@ -218,19 +263,26 @@ function endDrag(e: PointerEvent): void {
      stays the only thing deciding how the grid gets there, so a fling lands
      with the same easing as a drag. */
   scrollX.target += flingX * DRAG.fling * 60;
+  scrollY.target += flingY * DRAG.fling * 60;
 }
 
 canvas.addEventListener('pointerup', endDrag);
 canvas.addEventListener('pointercancel', endDrag);
 
-/* A trackpad's horizontal axis drives the same rail. Vertical is deliberately
-   ignored rather than mapped onto it: a two-axis wheel on a one-axis gallery
-   makes every diagonal gesture feel like a fight. */
+/* Both trackpad axes map straight through, so a two-finger scroll pans the
+   gallery exactly like a drag. Signs are negated relative to the drag: a
+   wheel reports the direction the CONTENT should travel, a pointer reports
+   the direction the HAND travelled. */
 canvas.addEventListener(
   'wheel',
   (e) => {
     e.preventDefault();
-    scrollX.target -= e.deltaX * DRAG.multiplier * 0.6;
+    /* DOM_DELTA_LINE (1) and DOM_DELTA_PAGE (2) arrive from mouse wheels and
+       some Firefox configurations in units that are not pixels; without this
+       a single notch jumps the grid by a couple of cards. */
+    const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? window.innerHeight : 1;
+    scrollX.target -= e.deltaX * unit * DRAG.multiplier * 0.6;
+    scrollY.target -= e.deltaY * unit * DRAG.multiplier * 0.6;
   },
   { passive: false },
 );
@@ -255,12 +307,10 @@ const mDepth = new Float32Array(MAX_MESH);
 const mCard = new Int32Array(MAX_MESH);
 const order: number[] = [];
 
-/* Which cards are on screen this frame, and where the animation budget got
-   to last frame, so every visible card takes its turn. */
+/* Which cards are on screen this frame. The repaint budget itself lives in
+   the scene bank, which can tell a cheap pass from an expensive one. */
 const cardSeen = new Int32Array(CARDS.length).fill(-1);
 const visibleCards: number[] = [];
-const animQueue: number[] = [];
-let animCursor = 0;
 let frameId = 0;
 
 /**
@@ -284,10 +334,13 @@ function frame(now: number): void {
 
   const g = gap.step(dt);
   const sx = scrollX.step(dt);
+  const sy = scrollY.step(dt);
   /* The spring's own velocity is the honest measure of how fast the grid is
      moving: it covers the drag, the fling and the settle with one number,
      where a pointer-derived speed reads zero the instant a finger lifts. */
-  magnitude.target = Math.abs(scrollX.v);
+  /* Magnitude over both axes, so a purely vertical fling dollies the camera
+     exactly as much as a horizontal one. */
+  magnitude.target = Math.hypot(scrollX.v, scrollY.v);
   const speed = magnitude.step(dt);
   const px = parallaxX.step(dt);
   const py = parallaxY.step(dt);
@@ -331,7 +384,7 @@ function frame(now: number): void {
     const stagger = (row & 1) * cellW * 0.5;
     for (let col = 0; col < cols; col++) {
       const x = wrap((col - (cols - 1) / 2) * cellW + sx + stagger, periodX);
-      const y = wrap(-(row - (rows - 1) / 2) * cellH, periodY);
+      const y = wrap(-(row - (rows - 1) / 2) * cellH - sy, periodY);
       const ax = x / R;
       const ay = y / R;
       const cay = Math.cos(ay);
@@ -369,18 +422,16 @@ function frame(now: number): void {
     }
   }
 
-  /* Only what is on screen gets repainted, and only a few per frame. At a
-     six-card budget against roughly a dozen visible, every card refreshes
-     about every other frame, which is well past the rate at which drifting
-     cloud and flickering neon read as continuous. */
+  /* Decoded video frames go up FIRST. The card pass reads these textures a
+     few lines below, so uploading afterwards would show every clip one frame
+     behind for no reason. */
+  videoBank?.update();
+
+  /* Hand the bank everything on screen and let it decide what to repaint:
+     it knows which cards are cheap source blits and which are expensive
+     painters, and only the painters need rationing. */
   if (visibleCards.length > 0) {
-    animQueue.length = 0;
-    const take = Math.min(ANIM_BUDGET, visibleCards.length);
-    for (let i = 0; i < take; i++) {
-      animQueue.push(visibleCards[(animCursor + i) % visibleCards.length]);
-    }
-    animCursor = (animCursor + take) % visibleCards.length;
-    sceneBank.render(animQueue, now / 1000);
+    sceneBank.render(visibleCards, now / 1000);
     gl.viewport(0, 0, canvas.width, canvas.height);
   }
 
@@ -413,6 +464,10 @@ function frame(now: number): void {
     const card = mCard[k];
     gl.uniform1i(u.uFlat, 0);
     gl.uniform1f(u.uOpacity, 1);
+
+    /* Every card samples its own texture, whatever fed it. Cover-fit was
+       handled upstream in the card pass, so these uniforms stay at identity
+       and the refraction is never scaled by a source's aspect. */
     gl.bindTexture(gl.TEXTURE_2D, sceneBank.textures[card]);
     gl.drawElements(gl.TRIANGLES, plane.indexCount, gl.UNSIGNED_SHORT, 0);
 

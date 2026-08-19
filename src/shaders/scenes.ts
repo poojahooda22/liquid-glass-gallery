@@ -427,44 +427,104 @@ export const ENV_FRAG = /* glsl */ `#version 300 es
 precision highp float;
 in vec2 vUv;
 out vec4 frag;
-/* 1.0 when the target is RGBA16F. On a context without float render targets
-   the whole map is divided down to fit in a byte and multiplied back at
-   sample time, which keeps the highlights above 1.0 at the cost of precision
-   in the dim half of the room. */
+/* Encoding control. On an RGBA16F target uOutScale is 1 and uOutSqrt is 0, so
+   true radiance is written straight out. On the byte fallback the map is
+   normalised by a range and square-root encoded: a plain divide would crush
+   the room's dark half (around 0.008) to zero, where sqrt keeps rough
+   relative precision from 0.001 up to the top of the range. */
 uniform float uOutScale;
+uniform float uOutSqrt;
 ${NOISE}
+
+/* --------------------------------------------------------------------------
+   The reference's own environment, reconstructed from measurement: Poly
+   Haven's "Studio Small 03" 1k HDR, which the site serves from
+   /hdri/studio_small_03_1k.hdr. It is CC0, so the real file can be dropped in
+   instead - this is the no-asset version of the same room.
+
+   Read back off the live page as a 32x12 grid of mean radiance, the room is
+   almost entirely BLACK with three discrete features:
+
+     v>0.90  ceiling ......... 0.01 everywhere
+     u~0.23  v~0.73  KEY ..... cell mean 437, true peak 3363
+     u~0.67  v~0.50  strip ... cell mean 32, narrow and vertical
+     u~0.23  v~0.46  panel ... 0.25, a large dim diffuser
+     v<0.25  floor ........... flat 0.33 rising to 0.60 straight down
+     everything else ......... 0.00 - 0.01
+
+   That distribution is the whole trick, and it is the opposite of what a
+   hand-authored map looks like. My previous version spread six softboxes at
+   14-34 evenly around the sphere, which puts a small reflection in EVERY
+   direction - and a constant reflection reads as haze lying on the card
+   rather than as light. Because the real room is black nearly everywhere, a
+   card facing the viewer reflects 0.002 and stays clean; the specular only
+   ignites where a bevel normal sweeps past one of the three sources. Clean
+   glass plus a travelling highlight is what the eye reads as glass.
+-------------------------------------------------------------------------- */
+
+/* Measured chromaticity: the room is cool, b/r about 1.33, at every latitude. */
+const vec3 ROOM_TINT = vec3(1.00, 1.19, 1.33);
+const vec3 KEY_TINT  = vec3(0.87, 0.96, 1.00);
+const vec3 FILL_TINT = vec3(0.96, 1.00, 0.99);
 
 /* Longitude is periodic, so distance has to wrap or every light grows a seam. */
 float lonDist(float a, float b) { return abs(fract(a - b + 0.5) - 0.5); }
 
-float softbox(vec2 p, vec2 c, vec2 s, float soft) {
-  float dx = lonDist(p.x, c.x) - s.x;
-  float dy = abs(p.y - c.y) - s.y;
+/* A rectangular source with a soft shoulder. Sources are stacked from several
+   of these because the measured falloff is not one smoothstep: 3363 at the
+   core, 173 a few percent of longitude out, then 12, then black. */
+float source(vec2 p, vec2 c, vec2 halfSize, float soft) {
+  float dx = lonDist(p.x, c.x) - halfSize.x;
+  float dy = abs(p.y - c.y) - halfSize.y;
   return 1.0 - smoothstep(-soft, soft, max(dx, dy));
 }
 
 void main() {
-  float lon = vUv.x;
-  float lat = vUv.y;
+  vec2 p = vUv;                    // x = longitude, y = latitude, 1 is straight up
 
-  vec3 col = mix(vec3(0.010, 0.011, 0.014), vec3(0.055, 0.060, 0.072), smoothstep(0.45, 1.0, lat));
-  col = mix(vec3(0.020, 0.020, 0.023), col, smoothstep(0.44, 0.56, lat));
-  col += vec3(0.90, 0.93, 1.00) * smoothstep(0.90, 0.985, lat) * 6.0;
+  /* The room. Measured 0.00-0.01 in every direction that is not a source, and
+     that near-black floor is what lets a card facing the viewer stay clean. */
+  vec3 col = ROOM_TINT * (0.002 + 0.002 * smoothstep(0.95, 0.35, p.y));
 
-  /* Small, hard-edged, and far above 1.0. These are the whole reason the
-     bevel throws a bright streak instead of a grey smudge: the material caps
-     the environment mix at 0.27, so only a source well past 3.7 can reach
-     white on the card. */
-  col += vec3(1.00, 0.99, 0.97) * softbox(vec2(lon, lat), vec2(0.12, 0.70), vec2(0.045, 0.075), 0.010) * 34.0;
-  col += vec3(0.88, 0.94, 1.00) * softbox(vec2(lon, lat), vec2(0.46, 0.66), vec2(0.030, 0.055), 0.008) * 22.0;
-  col += vec3(1.00, 0.92, 0.80) * softbox(vec2(lon, lat), vec2(0.79, 0.72), vec2(0.055, 0.040), 0.010) * 18.0;
-  col += vec3(1.00, 1.00, 1.00) * softbox(vec2(lon, lat), vec2(0.30, 0.82), vec2(0.26, 0.010), 0.006) * 26.0;
-  col += vec3(0.80, 0.90, 1.00) * softbox(vec2(lon, lat), vec2(0.68, 0.55), vec2(0.010, 0.13), 0.005) * 14.0;
-  col += vec3(1.00, 0.96, 0.90) * softbox(vec2(lon, lat), vec2(0.93, 0.60), vec2(0.008, 0.030), 0.004) * 30.0;
+  /* FLOOR. Flat 0.33 at v=0.21 rising to 0.60 straight down - a lit
+     cyclorama, and the only large bright area. It fills the underside of
+     every bevel. */
+  col += ROOM_TINT * (0.55 * smoothstep(0.28, 0.05, p.y) + 0.12 * smoothstep(0.38, 0.14, p.y));
 
-  col += vec3(0.35, 0.38, 0.45) * exp(-pow((lat - 0.60) * 4.0, 2.0)) * 0.35;
-  col += vec3(0.30, 0.28, 0.26) * smoothstep(0.42, 0.10, lat) * 0.5;
-  col *= 0.85 + fbm(vec2(lon * 8.0, lat * 4.0), 4) * 0.35;
+  /* KEY. Centre u=0.227, v=0.734, peak 3363. Three tiers so the core stays
+     small and hard while the spill still reaches a few percent out. */
+  const vec2 KEY = vec2(0.227, 0.734);
+  col += KEY_TINT * source(p, KEY, vec2(0.008, 0.011), 0.003) * 2400.0;
+  col += KEY_TINT * source(p, KEY, vec2(0.018, 0.024), 0.010) * 260.0;
+  col += KEY_TINT * source(p, KEY, vec2(0.038, 0.050), 0.035) * 9.0;
 
-  frag = vec4(col * uOutScale, 1.0);
+  /* STRIP. A narrow vertical source at u=0.672 straddling the horizon from
+     v=0.38 to v=0.63. The second, much dimmer specular. */
+  const vec2 FILL = vec2(0.672, 0.500);
+  col += FILL_TINT * source(p, FILL, vec2(0.010, 0.070), 0.010) * 55.0;
+  col += FILL_TINT * source(p, FILL, vec2(0.040, 0.120), 0.045) * 4.0;
+
+  /* PANEL. The large dim diffuser at u 0.14-0.36, v 0.29-0.63. Across
+     longitude the measurement is a bump, not a box - 0.07, 0.18, 0.22, 0.28,
+     0.31, 0.26, 0.21, 0.06 - so it is a gaussian with its tail subtracted.
+     The subtraction matters: an un-truncated gaussian leaves about 0.02
+     everywhere, and 0.02 in every direction is exactly the haze this map
+     exists to avoid. Too dim to make a highlight, but it is the soft sheen
+     that crosses the flat middle of a card as it turns. */
+  float panelU = max(exp(-pow(lonDist(p.x, 0.262) / 0.105, 2.0)) - 0.09, 0.0) * 0.34;
+  /* And it is asymmetric: the measurement falls 0.22 -> 0.06 -> 0.00 over two
+     cells on the right while trailing off gently on the left, so the right
+     edge gets an explicit cut. Signed, wrapped longitude, because a symmetric
+     distance cannot express "this side only". */
+  float du = fract(p.x - 0.262 + 0.5) - 0.5;
+  panelU *= 1.0 - smoothstep(0.085, 0.120, du);
+  float panelV = 1.0 - smoothstep(0.10, 0.20, abs(p.y - 0.460) - 0.09);
+  col += ROOM_TINT * panelU * panelV;
+
+  /* Large-scale unevenness only: enough to give the reflection something to
+     slide over, not enough to lift the black. */
+  col *= 0.88 + fbm(vec2(p.x * 7.0, p.y * 3.5), 4) * 0.24;
+
+  vec3 o = col * uOutScale;
+  frag = vec4(mix(o, sqrt(clamp(o, 0.0, 1.0)), uOutSqrt), 1.0);
 }`;

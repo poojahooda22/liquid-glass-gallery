@@ -58,7 +58,8 @@ uniform vec3 uCamLocal;   // xy in plane units, z in px
 uniform mat3 uRot;        // model rotation only
 uniform float uSphereR, uCornerR, uBevelW, uBevelPow, uBevelMaxSlope,
               uThickness, uIor, uRefractStrength, uDispersion,
-              uFresnelF0, uEnvIntensity, uEnvMaxMix, uEnvRot, uEnvRotX, uEnvScale,
+              uFresnelF0, uEnvIntensity, uEnvMaxMix, uEnvRot, uEnvRotX,
+              uEnvScale, uEnvSquare,
               uRimWidth, uRimIntensity, uOpacity;
 uniform vec3 uRimColor, uRimColorTop, uTint;
 uniform int uSamples;
@@ -91,6 +92,15 @@ float sdf(vec2 p) {
 float height(vec2 p) { return bevelHeight(sdf(p), uBevelW, uBevelPow, uThickness); }
 
 float chordZ(vec2 p) { return sqrt(max(uSphereR * uSphereR - dot(p, p), 1.0)); }
+
+/* Composite in LINEAR light. The reference is three.js, which decodes the
+   sRGB card texture on sample, mixes against a linear HDR environment, then
+   encodes once on output. Doing that arithmetic on sRGB-encoded values makes
+   a bright reflection clip against the content flatly instead of rolling into
+   it, which reads as plastic even when every other term is right. Rim and
+   tint are (1,1,1) here; linearise them on the CPU if they ever change. */
+vec3 srgbToLinear(vec3 c) { return pow(max(c, 0.0), vec3(2.2)); }
+vec3 linearToSrgb(vec3 c) { return pow(max(c, 0.0), vec3(1.0 / 2.2)); }
 
 vec2 equirectUV(vec3 d) {
   return vec2(atan(d.z, d.x) * 0.1591549, asin(clamp(d.y, -1.0, 1.0)) * 0.3183099) + 0.5;
@@ -149,7 +159,7 @@ void main() {
     float len = uThickness / max(abs(rr.z), 0.05);
     vec2 duv = rr.xy * len * uRefractStrength / uPlaneSize;
     vec2 uv2 = clamp(vUv + duv, 0.0, 1.0) * uCoverScale + uCoverOffset;
-    col += texture(uTex, uv2).rgb * uSW[i];
+    col += srgbToLinear(texture(uTex, uv2).rgb) * uSW[i];
   }
 
   /* Fresnel reflection of the studio environment. The .xy/.z split feeds the
@@ -169,7 +179,16 @@ void main() {
      (0.27), so a source has to exceed ~3.7 before the reflection can reach
      white. Cap an LDR map at 1.0 and the same maths can only ever return a
      grey haze, which is the difference between a lit slab and a flat card. */
-  vec3 env = texture(uEnv, equirectUV(Rr)).rgb * uEnvScale;
+  /* uEnvSquare is 0 on an RGBA16F environment, where the texel already IS the
+     radiance, and 1 on the byte fallback, where the map was square-root
+     encoded to fit 0..1 without crushing the dark half of the room. uEnvScale
+     is the range that encoding was normalised against.
+
+     Uploading this uniform at all is the load-bearing part: left at the GL
+     default of 0 the sample is pure black, the fresnel term can then only
+     DARKEN the bevel, and every specular highlight in the scene disappears. */
+  vec3 env = texture(uEnv, equirectUV(Rr)).rgb;
+  env = mix(env, env * env, uEnvSquare) * uEnvScale;
 
   float fres = uFresnelF0 + (1.0 - uFresnelF0) * pow(clamp(1.0 - dot(N, V), 0.0, 1.0), 5.0);
   float envMix = min(clamp(fres * uEnvIntensity, 0.0, 1.0), uEnvMaxMix);
@@ -185,5 +204,5 @@ void main() {
   float fw = max(fwidth(sd) * 0.5, 1e-4);
   float a = (1.0 - smoothstep(-fw, fw, sd)) * uOpacity;
   if (a < 0.001) discard;
-  frag = vec4(outCol, a);
+  frag = vec4(linearToSrgb(outCol), a);
 }`;

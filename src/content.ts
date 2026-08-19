@@ -65,3 +65,80 @@ export const CARDS: readonly Card[] = [
   { code: 'ILG-87', type: 'INFRASTRUCTURE', title: 'Hard Water', desc: 'What the pipes remember.', scene: 'water' },
   { code: 'ILG-90', type: 'CARTOGRAPHY', title: 'Continental Drift', desc: 'Slower than you, and winning.', scene: 'plane' },
 ];
+
+/**
+ * Photographic card content.
+ *
+ * The reference streams a video per card. Stills plus motion get most of the
+ * way there for none of the bandwidth, and the thing that actually matters to
+ * the glass is the same either way: high-frequency detail for the lens to
+ * bend. Foliage, breaking water, city-scale structure and paint texture all
+ * carry it; a smooth gradient does not, which is why the procedural scenes
+ * only ever half-worked as refraction subjects.
+ *
+ * Served straight from the Unsplash CDN, cropped to the card's 4:3 at source
+ * so nothing is scaled twice. The CDN sends an open CORS header, which is
+ * what allows the cross-origin texture upload. Free to use under the Unsplash
+ * License, no permission or attribution required.
+ *
+ * Eighteen images against thirty cards, so the set repeats - as the reference
+ * does, with nineteen clips across a hundred meshes.
+ */
+const unsplash = (id: string): string =>
+  `https://images.unsplash.com/photo-${id}?w=1200&h=900&fit=crop&crop=entropy&q=75&auto=format`;
+
+export const IMAGE_POOL: readonly string[] = [
+  '1518837695005-2083093ee35b', // ocean, breaking surf
+  '1559825481-12a05cc00344',    // ocean, open water
+  '1616141893496-fbc65370493e', // ocean, wave face
+  '1436491865332-7a61a109cc05', // airliner in flight
+  '1529074963764-98f45c47344b', // aircraft over cloud
+  '1464802686167-b939a6910659', // galaxy
+  '1444703686981-a3abbc4d4fe3', // deep field
+  '1464822759023-fed622ff2c3b', // mountain range
+  '1483728642387-6c3bdd6c93e5', // ridge line
+  '1506905925346-21bda4d32df4', // peaks at altitude
+  '1454496522488-7a8e488e8606', // alpine light
+  '1603437873662-dc1f44901825', // cloud bank
+  '1501630834273-4b5604d2ee31', // sky
+  '1605721911519-3dfeb3be25e7', // painter at the canvas
+  '1541753866388-0b3c701627d3', // paint and brushes
+  '1542273917363-3b1817f69a2d', // forest canopy
+  '1507041957456-9c397ce39c97', // woodland
+  '1531366936337-7c912a4589a7', // aurora
+].map(unsplash);
+
+/**
+ * Moving card content.
+ *
+ * The reference streams one clip per card, and that is the thing a still
+ * cannot fake: clouds billow, surf breaks, the sky rotates. A slow pan over a
+ * photograph reads as a slideshow, not as footage - which is exactly what the
+ * first pass got wrong.
+ *
+ * 720p renditions, which is the right size for a card a few hundred pixels
+ * wide on a sphere; 1080p costs decode budget for detail the refraction
+ * throws away immediately. Served with an open CORS header, which is what
+ * allows the cross-origin frame upload. Free under the Pexels licence, no
+ * attribution required.
+ *
+ * Thirteen clips across thirty cards, so the set repeats - as the reference
+ * does with nineteen across a hundred. Cards fall back to a photograph while
+ * a clip buffers, and to a procedural scene before that, so the grid is never
+ * incomplete.
+ */
+export const VIDEO_POOL: readonly string[] = [
+  'https://videos.pexels.com/video-files/2865145/2865145-hd_1280_720_30fps.mp4',    // cloud timelapse
+  'https://videos.pexels.com/video-files/9540152/9540152-hd_1280_720_25fps.mp4',    // cloud bank
+  'https://videos.pexels.com/video-files/34693119/14704849_1280_720_30fps.mp4',     // ocean
+  'https://videos.pexels.com/video-files/35371501/14986828_1280_720_30fps.mp4',     // surf
+  'https://videos.pexels.com/video-files/6867012/6867012-hd_1280_720_24fps.mp4',    // milky way
+  'https://videos.pexels.com/video-files/13322952/13322952-hd_1280_720_30fps.mp4',  // night sky
+  'https://videos.pexels.com/video-files/36111065/15314254_1280_720_30fps.mp4',     // mountains
+  'https://videos.pexels.com/video-files/28638515/12438507_1280_720_24fps.mp4',     // ridge line
+  'https://videos.pexels.com/video-files/34283393/14524500_1280_720_30fps.mp4',     // aerial
+  'https://videos.pexels.com/video-files/11130971/11130971-hd_1280_720_30fps.mp4',  // flight
+  'https://videos.pexels.com/video-files/6074110/6074110-hd_1280_720_24fps.mp4',    // forest
+  'https://videos.pexels.com/video-files/6800084/6800084-hd_1280_720_25fps.mp4',    // painting
+  'https://videos.pexels.com/video-files/8064422/8064422-hd_1280_720_30fps.mp4',    // city at night
+];

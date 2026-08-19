@@ -70,3 +70,26 @@ export const LOW_TIER =
 
 export const DPR_CAP = LOW_TIER ? 1.5 : 2;
 export const DISPERSION_SAMPLES = LOW_TIER ? 3 : GLASS.dispersionSamples;
+
+/**
+ * Video-backed cards, off by default.
+ *
+ * The reference streams one HLS rendition per card into a detached <video>
+ * and uploads it as a texture; gl/video.ts has the mechanics. Point `sources`
+ * at your own .m3u8 or .mp4 URLs and set `enabled` to true. Any card without
+ * a video keeps its procedural scene, so a short list is fine - the reference
+ * itself ships 19 clips across 100 meshes.
+ *
+ * HLS needs hls.js everywhere except Safari, which plays .m3u8 natively:
+ *   npm i hls.js
+ * Plain .mp4 needs nothing. Cross-origin sources must send CORS headers or
+ * the texture upload taints the context and the draw fails.
+ */
+export const VIDEO = {
+  enabled: true,
+  sources: [] as { src: string; poster?: string }[],
+  /* Only fetched when an .m3u8 source is present, no global Hls exists, and
+     the browser cannot play HLS natively. Set to '' to disable the fetch, or
+     import hls.js yourself and assign it to globalThis.Hls. */
+  hlsUrl: 'https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.mjs',
+};
