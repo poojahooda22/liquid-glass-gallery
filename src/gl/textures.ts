@@ -48,33 +48,38 @@ function drawLabel(x: Ctx, w: number, h: number, card: Card): void {
   x.fillStyle = bottom;
   x.fillRect(0, h * 0.48, w, h * 0.52);
 
-  const pad = w * 0.055;
-  const metaY = pad + w * 0.019;
+  /* Split axes on purpose: the horizontal inset is what keeps type clear of
+     the bevel, where refraction is strongest and a glyph sitting too close
+     gets bent and colour-fringed. Vertical stays where it was so the meta row
+     and the title keep their existing relationship to the card edges. */
+  const padX = w * 0.085;
+  const padY = w * 0.055;
+  const metaY = padY + w * 0.019;
   x.textBaseline = 'alphabetic';
   x.font = '500 ' + (w * 0.0205).toFixed(1) + 'px ' + MONO;
   setTracking(x, w * 0.0024);
 
   x.textAlign = 'left';
   x.fillStyle = 'rgba(255,255,255,0.95)';
-  x.fillText(card.code, pad, metaY);
+  x.fillText(card.code, padX, metaY);
   const codeWidth = x.measureText(card.code).width;
   x.fillStyle = 'rgba(255,255,255,0.66)';
-  x.fillText(card.type, pad + codeWidth + w * 0.028, metaY);
+  x.fillText(card.type, padX + codeWidth + w * 0.028, metaY);
 
   x.textAlign = 'right';
   x.fillStyle = 'rgba(255,255,255,0.55)';
-  x.fillText('SELECTED WORK · 2026', w - pad, metaY);
+  x.fillText('SELECTED WORK · 2026', w - padX, metaY);
 
   x.textAlign = 'left';
   setTracking(x, -w * 0.0014);
   x.font = '600 ' + (w * 0.079).toFixed(1) + 'px ' + SANS;
   x.fillStyle = '#ffffff';
-  x.fillText(card.title, pad, h - pad - w * 0.046);
+  x.fillText(card.title, padX, h - padY - w * 0.046);
 
   setTracking(x, 0);
   x.font = '400 ' + (w * 0.0265).toFixed(1) + 'px ' + SANS;
   x.fillStyle = 'rgba(255,255,255,0.74)';
-  x.fillText(card.desc, pad, h - pad);
+  x.fillText(card.desc, padX, h - padY);
 }
 
 export function buildLabelCanvases(): LabelCanvas[] {
